@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vue-ingress
+spec:
+  rules:
+    - host: "jbaizanis.ddns.net"
+      http:
+        paths:
+          - path: /
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: vue-svc
+                port:
+                  name: vue
+    - host: "jbaizanis-jenkins.ddns.net"
+      http:
+        paths:
+          - path: /
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: vue-svc
+                port:
+                  name: vue

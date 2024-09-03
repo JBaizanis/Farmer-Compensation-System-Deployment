@@ -1,0 +1,41 @@
+pipeline {
+    agent any
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '30'))
+    }
+
+    environment {
+        EMAIL_TO = "it2021064@hua.gr"
+        DOCKER_TOKEN = credentials('docker-push-secret')
+        DOCKER_USER = 'jbaizanis'
+        DOCKER_SERVER = 'ghcr.io'
+        DOCKER_PREFIX = 'ghcr.io/jbaizanis/devops-spring'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'master', url: 'git@github.com:JBaizanis/docker-backend-repo.git'
+            }
+        }
+        stage('Test') {
+            steps {
+                sh 'chmod +x ./mvnw && mvn package -Dmaven.test.skip'
+            }
+        }
+        stage('run ansible pipeline') {
+            steps {
+                build job: 'ansible'
+            }
+        }
+        stage('Install project with docker compose') {
+                    steps {
+                        sh '''
+                            export ANSIBLE_CONFIG=~/workspace/ansible/ansible.cfg
+                            ansible-playbook -i ~/workspace/ansible/hosts.yaml -l backend-vm ~/workspace/ansible/playbooks/spring-vue-docker-jenkins.yaml
+                        '''
+                    }
+         }
+    }
+}
