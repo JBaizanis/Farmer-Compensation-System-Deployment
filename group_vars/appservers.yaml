@@ -1,0 +1,7 @@
+appdir: "{{ ansible_user_dir }}/spring"
+branch: "main"
+appuser: "{{ansible_user_id}}"
+appgroup: "{{ansible_user_gid}}"
+app_port: 8080
+app:
+  VITE_BACKEND: http://40.89.179.118

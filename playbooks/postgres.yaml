@@ -1,0 +1,116 @@
+---
+- hosts: dbservers
+  become: yes
+  become_user: root
+  # Το συγκεκριμένο playbook θα εκτελεστεί στους hosts οι οποίοι βρίσκονται κάτω από το dbservers group στο hosts.yaml αρχείο και ειδικότερα θα εκτελεστεί στον 
+  # host azure-db-server. Όλα τα tasks παρακάτω θα εκτελεστούν σαν root user αφού ορίζεται πως become_user: root. 
+
+  # Στα pre_tasks ορίζω πως πριν εκτελεστούν τα κανονικά tasks, θα πρέπει να εγκατασταθεί η postgres, η python καθώς η postgres κάνει χρήση της python αλλά και το πακέτο 
+  # psycopg2-binary.
+  pre_tasks:
+    - name: Install the PostgreSQL package
+      apt:
+        name: ["postgresql-contrib", "postgresql-client"]
+        state: present
+        update_cache: yes
+
+    - name: install pip3
+      apt:
+        name: ["python3-pip"]
+        state: present
+        update_cache: yes
+
+    - name: "Install Python packages"
+      pip:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - psycopg2-binary
+
+  # Ελέγχω αν η postgres είναι εγκατεστημένη στο συγκεκριμένο path παρακάτω και αναθέτω στην μεταβλητή postgres_data το αποτέλεσμα αυτού του ελέγχου.
+  tasks:
+    - name: check if postgres is initialized
+      ansible.builtin.stat:
+        path: /var/lib/postgresql/14/main
+      register: postgres_data
+    
+    # Ελέγχω την τιμή της μεταβλητής postgres_data για λόγους debugging και εμφανίζω αντίστοιχο μήνυμα. 
+    - name: debug stat
+      ansible.builtin.debug:
+        msg: "postgres data debug {{postgres_data}}"
+
+    # Δημιουργώ-κάνω initialize μια βάση postgres αν δεν υπάρχει ήδη. 
+    - name: "Initialize PostgreSQL"
+      shell: "postgresql-setup initdb"
+      when: not postgres_data.stat.exists
+
+    # Ξεκινώ το postgres service.
+    - name: "Start and enable services"
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      with_items:
+        - postgresql
+
+    # Δημιουργώ μια βάση με όνομα compensation το οποίο βρίσκεται στην μεταβλητή db.name. Προκειμένου να το κάνω αυτό έχω γίνει χρήστης postgres, become_user: postgres.
+    - name: "Create compensation database"
+      postgresql_db:
+        state: present
+        name: "{{ db.name }}"
+      become: yes
+      become_user: postgres
+
+    # Δημιουργώ έναν νέο χρήστη υπό το όνομα dbuser το οποίο βρίσκεται στην αντίστοιχη μεταβλητή db.user και του αναθέτω τον αντίστοιχο κωδικό πρόσβασης.
+    - name: "Create db user"
+      postgresql_user:
+          state: present
+          name: "{{ db.user }}"
+          password: "{{ db.password }}"
+      become: yes
+      become_user: postgres
+
+    # Δίνω πρόβαση στον χρήστη που δημιούργησα και πιο συγκεκριμένα όπως φαίνεται και παρακάτω από την εντολή privs: all, δίνω στον χρήστη όλα τα δικαίωματα τα οποία διαθέτει
+    # η postgres. Π.χ δικαίωμα για την δημιουργία πινάκων, προσθήκη στοιχείων, δηλαδή δικαιωμάτων όπως CREATE, SELECT, INSERT κτλ.
+    - name: "Grant db user access to compensation db"
+      postgresql_privs:
+        type: database
+        database: "{{ db.name }}"
+        roles: "{{ db.user }}"
+        grant_option: no
+        privs: all
+      become: yes
+      become_user: postgres
+
+    # Ρυθμίζω το pg_hba.conf αρχείο για να επιτρέπει το MD5 password authentication για τον δημιουργηθέντα χρήστη παραπάνω, από οποιαδήποτε διεύθυνση IP.
+    - name: "Allow md5 connection for the db user"
+      postgresql_pg_hba:
+        dest: "/etc/postgresql/14/main/pg_hba.conf"
+        contype: host
+        databases: all
+        source: 0.0.0.0/0
+        method: md5
+        users: "{{ db.user }}"
+        create: true
+      become: yes
+      become_user: postgres
+      notify: restart postgres
+
+    # Κάνω update το postgresql.conf αρχείο ώστε να επιτρέπω συνδέσεις από οποιαδήποτε IP address. Αυτό φαίνεται παρακάτω, όπου αντικαθιστώ με την εντολή lineinfile 
+    # την γραμμή listen_addresses = '*' με ^#listen_addresses = 'localhost'. Πιο συγκεκριμένα, αυτό σημαίνει ότι όπου ύπαρχει localhost βάζω *, δηλαδή επιτρέπονται 
+    # συνδέσεις όχι μόνο μέσω του localhost αλλά από οποιαδήποτε IP.
+    - name: "Allow connections from all"
+      lineinfile:
+        path: "/etc/postgresql/14/main/postgresql.conf"
+        line: "listen_addresses = '*'"
+        regexp: "^#listen_addresses = 'localhost'"
+        state: present
+      become: yes
+      become_user: postgres
+      notify: restart postgres
+  # Με την χρήση ενός handler κάνω restart το PostgreSQL service για την καταχώρηση των παραπάνω αλλαγών.
+  handlers:
+    - name: restart postgres
+      service: name=postgresql state=restarted
+
+

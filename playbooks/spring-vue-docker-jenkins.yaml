@@ -1,0 +1,86 @@
+- hosts: all
+  become: yes
+  tasks:
+    - name: Check if Docker is installed
+      shell: docker --version && docker compose version
+      register: docker_version_result
+      ignore_errors: true
+
+    - name: Set Docker installed fact
+      set_fact:
+        docker_installed: "{{ docker_version_result.rc == 0 }}"
+
+    # - name: Include install_docker playbook if Docker is not installed
+    #   include_tasks: docker.yaml
+    #   when: not docker_installed
+    
+    # Για να εντοπίσω αν το docker και το docker compose είναι εγκατεστημένα κάνω έναν έλεγχο, βλέποντας την έκδοση τους. Αναθέτω το αποτέλεσμα του ελέγχου των 
+    # εκδόσεων του docker και docker compose, στην μεταβλητή docker_version_result. Σε περίπτωση που το αποτέλεσμα στην μεταβλητή είναι οτιδήποτε εκτός του μηδενός, όπου 0 
+    # σημαίνει επιτυχής εκτέλεση, τότε είτε το docker είτε το docker compose είτε και τα δύο δεν είναι εγκατεστημένα. Σε περίπτωση που δεν είναι εγκατεστημένα, 
+    # εκτελείται το επόμενο task, όπου με την σειρά του εκτελεί το playbook docker.yaml για την εγκατάσταση τόσο του docker όσο και του docker compose στο vm. 
+    # Το συγκεκριμένο task το έχω κάνει comment αφού είναι ήδη εγκατεστημένα τόσο το docker όσο και το docker compose, στο vm που κάνω deploy την εφαρμογή.
+
+    # Κάνω clone το spring project από το αντίστοιχο git repo.
+    - name: "Clone the Spring repository"
+      git:
+        repo: "https://github.com/JBaizanis/devops-test.git"
+        dest: "{{ appdir }}"
+        version: "{{ branch }}"
+        force: yes
+    
+    # Κάνω update το αρχείο application.properties με τα items τα οποία βρίσκονται στο αρχείο backend-vm.yaml στον φάκελο host_vars. Αυτά τα items είναι το όνομα και ο κωδικός
+    # του χρήστη της βάσης, dbuser και pass123 αλλά και το όνομα και το url στο οποίο τρέχει η βάση spring.datasource.url: jdbc:postgresql://4.211.248.159:5432/compensation.
+    - name: "Populate application.properties"
+      lineinfile:
+        dest: "{{ appdir }}/src/main/resources/application.properties"
+        state: present
+        regexp: "^{{item.key}}="
+        line: "{{item.key}}={{item.value}}"
+      with_items:
+        - "{{app.env | dict2items}}"
+    
+    # Επειδή για το deployment της εφαρμογής μέσω docker-compose με την χρήση jenkins, κάνω install την εφαρμογή σε άλλο vm και όχι σε αυτό που έτρεχε με docker-compose
+    # με την χρήση της ansible, αλλάζω την IP στην οποία τρέχει η βάση στο application.properties και τοποθετώ την νέα, δηλαδή την IP του νέου vm στο οποίο θα τρέξει η εφαρμογή-
+    # βάση μέσω docker-compose με την χρήση jenkins.
+    - name: "Update datasource URL to new IP"
+      lineinfile:
+        dest: "{{ appdir }}/src/main/resources/application.properties"
+        state: present
+        regexp: "^spring.datasource.url="
+        line: "spring.datasource.url=jdbc:postgresql://51.120.247.169:5432/compensation"
+    
+    # Επειδή μπορεί να τρέχουν διεργασίες και να απασχολούν το port 5432 στο οποίο "ακούει" η βάση, τις κάνω stop, ειδάλλως δεν μπορώ να τρέξω την εφαρμογή καθώς εμφανίζεται 
+    # ομώνυμο σφάλμα. 
+    - name: Stop processes using port 5432
+      become: yes
+      shell: "sudo lsof -i :5432 | awk 'NR>1 {print $2}' | xargs sudo kill"
+      ignore_errors: true
+
+    # Κάνω docker compose down ώστε να σταματήσω οποιαδήποτε containers μπορεί να τρέχουν από προηγούμενη εκτέλεση.
+    - name: Tear down existing services
+      community.docker.docker_compose:
+        project_src: "{{ appdir }}"
+        state: absent
+    
+    # Το συγκεκριμένο task κάνει build και ξεκινάει τα services τα οποία ορίζονται στο αρχείο docker-compose.yaml στον κώδικα του backend.
+    - name: Create and start services
+      community.docker.docker_compose:
+        project_src: "{{ appdir }}"
+        build: true
+        state: present
+        files: 
+          - "{{ appdir }}/docker-compose-jenkins.yaml"
+      register: output
+      notify: Restart Docker Compose
+
+    - debug:
+        var: output
+  # Μέσω της χρήσης ενός handler κάνω restart τα services του docker-compose.yaml αρχείου. Ο handler γίνεται notify μέσω του προηγούμενου task, μέσω της εντολής 
+  # notify: Restart Docker compose. Ο λόγος που γίνεται restart είναι για να λάβουν χώρα οι αλλαγές οι οποίες συνέβησαν παραπάνω.
+  handlers:
+    - name: Restart Docker Compose
+      community.docker.docker_compose:
+        project_src: "{{ appdir }}"
+        restarted: true
+        files: 
+          - "{{ appdir }}/docker-compose-jenkins.yaml"

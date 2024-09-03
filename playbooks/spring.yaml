@@ -1,0 +1,129 @@
+---
+- hosts: all
+  # Το συγκεκριμένο playbook μπορεί να εκτελεστεί σε όλους τους hosts. Ειδικότερα όμως θα εκτελεστεί στον host backend-vm κάτω από την ομάδα appservers. 
+
+  # Στα pre_tasks ορίζω πως πριν εκτελεστούν τα κανονικά tasks, θα πρέπει να εγκατασταθεί η java και το maven ώστε να μπορεί να τρέξει η εφαρμογή μου.
+  pre_tasks:
+    - name: Install Java
+      apt:
+          name: openjdk-21-jdk
+          state: present
+          update_cache: yes
+      become: yes
+
+    - name: Install maven
+      apt:
+          name: maven
+          state: present
+          update_cache: yes
+      become: yes
+
+  tasks:
+      - name: "debug appdir"
+        ansible.builtin.debug:
+          msg: "appdir {{ansible_user_dir}}"
+
+      # Κάνω clone το repository στο οποίο βρίσκεται ο κώδικας του backend. Ειδικότερα, η dest καθορίζει πως μόλις γίνει clone ο κώδικας θα αποθηκευτεί στο vm στον κατάλογο που
+      # ορίζεται στην μεταβλητή appdir. Τέλος, αναφέρω πως ο κώδικας βρίσκεται στο branch main στο repository και αυτό φαίνεται μέσα από την εντολή version: "{{branch}}" όπου
+      # η branch είναι μια μεταβλητή, η οποία περιέχει το string main και δηλώνεται στο αρχείο appservers.yaml στον φάκελο group_vars.
+      - name: "Clone the Spring repository"
+        git:
+            repo: "https://github.com/JBaizanis/devops-test.git"
+            dest: "{{ appdir }}"
+            version: "{{ branch }}"
+            force: yes
+
+      # Κάνω update το αρχείο application.properties με τα items τα οποία βρίσκονται στο αρχείο backend-vm.yaml στον φάκελο host_vars. Αυτά τα items είναι το όνομα και ο κωδικός
+      # του χρήστη της βάσης, dbuser και pass123 αλλά και το όνομα και το url στο οποίο τρέχει η βάση spring.datasource.url: jdbc:postgresql://4.211.248.159:5432/compensation.
+      - name: "Populate application.properties"
+        lineinfile:
+          dest: "{{ appdir }}/src/main/resources/application.properties"
+          state: present
+          regexp: "^{{item.key}}="
+          line: "{{item.key}}={{item.value}}"
+        with_items:
+          - "{{app.env | dict2items}}"
+
+      # Κάνω build την εφαρμογή μου με την παρακάτω mvn εντολή.
+      - name: "Build the Spring application"
+        command: "mvn package -Dmaven.test.skip "
+        args:
+            chdir: "{{ appdir }}"
+
+#      - name: "Run the Spring application"
+#        command: "java -jar target/springbootdemo-0.0.1-SNAPSHOT.jar"
+#        args:
+#            chdir: "{{ appdir }}"
+
+      # Κάνω copy το jinja spring.service.j2 αρχείο στον κατάλογο /etc/systemd/system/spring.service, στο vm όπου γίνεται η εγκατάσταση του spring project. 
+      # Το αρχείο αυτό χρησιμοποείται για την δημιουργία ενός systemd service unit file για την διαχείρηση της Spring boot εφαρμογής σαν daemon. Ειδικότερα, χρησιμοποιείται 
+      # ώστε να επιτρέπει την διαχείρηση της εφαρμογής μέσω του systemd, όπως το να βλέπω το status της εφαρμογής, να μπορώ να την σταματώ (stop) ή να την κάνω restart.
+      - name: copy spring service file
+        template:
+          src: ../files/spring.service.j2
+          dest: "/etc/systemd/system/spring.service"
+        become: yes
+        become_user: root
+        notify: restart spring
+
+      # Κάνω restart το spring service. Η εντολή state: restarted διασφαλίζει ότι σε περίπτωση που το service τρέχει, να γίνει restart.
+      - name: reload spring service
+        service:
+          name: spring
+          state: restarted
+        become: yes
+
+      # Διασφαλίζω ότι το spring service έχει ξεκινήσει.
+      - name: ensure spring service started
+        service:
+          name: spring
+          state: started
+          enabled: yes
+        become: yes
+
+      # Κάνω install τον nginx ο οποίος χρησιμεύει σαν reverse proxy για την προώθηση των client requests στον αντίστοιχο backend server, δηλαδή στην βάση. Λειτουργεί δηλαδή
+      # σαν ενδιάμεσος μεταξύ των clients και του spring service.
+      - name: "APT - install nginx"
+        apt:
+          name: nginx
+          update_cache: yes
+        become: yes
+
+      # Κάνω copy το jinja αρχείο nginx.http.j2 στον κατάλογο παρακάτω, στο vm που θα γίνει η εγκατάσταση αυτού του playbook. Το αρχείο αυτό ορίζει πως όλα τα requests 
+      # τα οποία θα γίνονται θα πηγαίνουν στο url που ορίζεται σε αυτό.
+      - name: copy nginx conf file
+        template:
+          src: ../files/nginx.http.j2
+          dest: "/etc/nginx/sites-available/spring"
+        become: yes
+
+      # Ενεργοποιώ το spring site στον nginx και κάνω de-activate το default site του nginx, το οποίο τρέχει μέχρι να κάνω enable το spring site.
+      - name: enable spring site in nginx
+        file:
+          src: "/etc/nginx/sites-available/spring"
+          dest: "/etc/nginx/sites-enabled/spring"
+          state: link
+        become: yes
+        notify: restart nginx
+
+      - name: de-activate default nginx site
+        file:
+          path: /etc/nginx/sites-enabled/default
+          state: absent
+        become: yes
+        notify: restart nginx
+  # Με την χρήση ενός handler κάνω restart το spring service και με έναν άλλο το nginx service. Οι handlers γίνονται trigger Κάθε φορά με τις εντολές notify: restart spring και
+  # notify: restart nginx οι οποίες βρίσκονται στο τέλος μερικών tasks. Το restart των αντίστοιχων services γίνεται για να λάβουν χώρα κάθε φορά, οι αλλαγές οι οποίες 
+  # πραγματοποιούνται στα αντίστοιχα tasks.
+  handlers:
+  - name: restart spring
+    service:
+      name: spring
+      state: restarted
+    become: yes
+
+  - name: restart nginx
+    service:
+      name: nginx
+      state: restarted
+    become: yes

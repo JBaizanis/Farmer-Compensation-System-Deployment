@@ -1,0 +1,151 @@
+---
+- hosts: appservers
+  # Το συγκεκριμένο playbook μπορεί να εκτελεστεί στους hosts που βρίσκονται στην ομάδα appservers. 
+  # Ειδικότερα όμως θα εκτελεστεί στον host (vm) frontend-vm.
+
+  # Ορίζω τις μεταβλητές οι οποίες χρησιμοποιούνται από τα tasks παρακάτω. Ειδικότερα, η μεταβλητή frontendappdir ορίζει τον κατάλογο όπου θα αποθηκευτεί ο κώδικας του frontend
+  # μετά την λήψη του από το αντίστοιχο github repo. Η μεταβλητή branch περιέχει το branch στο οποίο βρίσκεται, στο αποθετήριο στο github ο κώδικας του frontend και η μεταβλητή
+  # site_location αναπαριστά το default site του vue.
+
+  vars:
+      frontendappdir: "{{ ansible_user_dir }}/frontend"
+      branch: "front"
+      site_location: /var/www/vue
+      
+  # Στα pre_tasks ορίζω πως πριν εκτελεστούν τα κανονικά tasks, θα πρέπει να εγκατασταθεί o nginx αλλά και το nvm τα οποία είναι απαραίτητα για την εκτέλεση της εφαρμογής.
+  pre_tasks:
+
+    - name: Install Nginx
+      package:
+        name: nginx
+        state: latest
+      become: yes
+
+    # Για να κάνω install το nvm, το κατεβάζω από το αντίστοιχο url μέσω της curl και αυτή η εντολή εκτελείται με την χρήση του φλοιού bash.
+    - name: Install nvm
+      shell: |
+        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+      args:
+        executable: /bin/bash
+        chdir: "$HOME"
+        creates: "$HOME/.nvm/nvm.sh"
+
+    - name: Setup .profile
+      ansible.builtin.lineinfile:
+        path: ~/.profile
+        line: source ~/.nvm/nvm.sh # This will make sure Node is on the user's PATH
+        create: yes
+
+    - name: "debug"
+      ansible.builtin.debug:
+        msg: "PATH : {{ ansible_env.PATH }}"
+
+    # Εγκαθιστώ το node το οποίο είναι απαραίτητο για την εκτέλεση της εφαρμογής. Η εντολή αυτή για την εγκατάσταση του node γίνεται μέσω του φλοιού bash.
+    - name: Install node
+      shell: |
+        source $HOME/.nvm/nvm.sh && nvm install 20.12.1
+      args:
+        executable: /bin/bash
+        chdir: "$HOME"
+        creates: "$HOME/.nvm/versions/node/v20.12.1"
+
+    # Εγκαθιστώ το git αλλά παράλληλα αφαιρώ και το προηγούμενο nginx configuration καθώς θα υπάρχει conflict με το αυτό που είχε οριστεί στο spring.yaml. Με το πέρας της
+    # αφαίρεσης του υπάρχοντος nginx configuration κάνω restart το nginx service ώστε να λάβουν χώρα οι αλλαγές.
+    - name: Install Git
+      package:
+        name: git
+        state: latest
+      become: yes
+
+    - name: Remove existing NGINX site configuration
+      file:
+        path: /etc/nginx/sites-enabled/spring
+        state: absent
+      become: yes
+
+    - name: Restart NGINX service
+      service:
+        name: nginx
+        state: restarted
+      become: yes
+
+
+ 
+  tasks:
+    # Αφού εκτελεστούν τα pre_tasks, κατεβάζω τον κώδικα του frontend από το αντίστοιχο repo στο github. 
+    - name: "Clone the Vue repository"
+      git:
+          repo: "https://github.com/JBaizanis/devops-test.git"
+          dest: "{{ frontendappdir }}"
+          version: "{{ branch }}"
+          force: yes
+
+    # Παίρνω το αρχείο .env.example το οποίο ορίζει τις μεταβλητές περιβάλλοντος και δημιουργώ ένα άλλο αρχείο .env με το ίδιο περιεχόμενο.
+    - name: copy env file
+      shell : "cp {{frontendappdir}}/.env.example {{frontendappdir}}/.env"
+
+    # Προσθέτω στο .env αρχείο τις μεταβλητές περιβάλλοντος (items) που ορίζονται στο αρχείο backend-vm.yaml στον φάκελο host_vars. Αυτά τα items είναι το όνομα και ο κωδικός
+    # του χρήστη της βάσης, dbuser και pass123 αλλά και το όνομα και το url στο οποίο τρέχει το backend. 
+    - name: populate  ~/.env
+      lineinfile:
+        dest: "{{frontendappdir}}/.env"
+        state: present
+        regexp: "^{{item.key}}="
+        line: "{{item.key}}='{{item.value}}'"
+      with_items:
+        - "{{app | dict2items}}"
+
+    # Κάνω install το npm.
+    - name: "Install dependencies"
+      shell: |
+        export PATH=$PATH:~/.nvm/versions/node/v20.12.1/bin; npm install
+      args:
+        chdir: "{{ frontendappdir }}"
+
+    # Κάνω build την εφαρμογή μου.
+    - name: "Build the Vue.js application"
+      shell: |
+        export PATH=$PATH:~/.nvm/versions/node/v20.12.1/bin; npm run build
+      args:
+        chdir: "{{ frontendappdir }}"
+
+    - name: Copy dist in nginx location 
+      copy:
+        src: "{{ frontendappdir }}/dist/"
+        dest: "{{ site_location }}"
+        remote_src: True
+        mode: 7777
+        force: true
+      notify: restart nginx
+      become: yes
+
+    # Παίρνω το jinja αρχείο nginx.vue.j2 το οποίο ορίζει πως όποια requests έρχονται στο /api θα ανακατευθύνονται στο url όπου τρέχει το backend. Τα υπόλοιπα requests θα 
+    # ανακατευθύνονται στο default vue site. Αντίστοιχα, ενεργοποιώ το vue site στον nginx και κάνω de-activate το default site του nginx, 
+    # το οποίο τρέχει μέχρι να κάνω enable το vue site.
+    - name: copy nginx conf file
+      template:
+        src: ../files/nginx.vue.j2
+        dest: "/etc/nginx/sites-available/vue"
+      become: yes
+
+    - name: enable vue site in nginx
+      file:
+        src: "/etc/nginx/sites-available/vue"
+        dest: "/etc/nginx/sites-enabled/vue"
+        state: link
+      become: yes
+    
+
+    - name: de-activate default nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      become: yes
+      notify: restart nginx
+  # Με την χρήση ενός handler, κάθε φορά που γίνεται trigger μέσω της εντολής notify: restart nginx, κάνω restart τον nginx για να λάβουν χώρα οι αλλαγές που συνέβησαν.   
+  handlers:
+    - name: restart nginx
+      service:
+        name: nginx
+        state: restarted
+      become: yes

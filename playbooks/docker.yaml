@@ -1,0 +1,51 @@
+---
+- hosts: all
+  become: yes
+  tasks:
+    # Παρακάτω εγκαθιστώ το docker και το docker-compose στο vm, στο οποίο θα γίνει deploy η εφαρμογή μέσω αυτών των εργαλείων. Ειδικότερα, η εγκατάσταση αυτών γίνεται με την 
+    # εκτέλεση του συγκεκριμένου playbook στο vm οποίο γίνεται deploy η εφαρμογή.
+    # Αρχικά, εγκαθιστώ βασικά πακέτα τα οποία ορίζονται στο loop μέρος του πρώτου task, στην συνέχεια, εγκαθιστώ το docker και το docker-compose και εν τέλει ξεκινώ το docker
+    # service και προσθέτω τον χρήστη στο vm στο group docker ώστε να μπορεί τρέχει εντολές docker.
+    - name: Install basic packages
+      apt:
+        name: "{{item}}"
+        state: present
+        update_cache: true
+      loop:
+        - software-properties-common
+        - curl
+        - apt-transport-https
+        - ca-certificates
+    # Αυτό το task παίρνει το επίσημο κλειδί GPG του Docker και το προσθέτει στη λίστα αξιόπιστων κλειδιών του συστήματος. Αυτό γίνεται ώστε τα πακέτα από το Docker repository να
+    # μπορούν να επαληθευτούν ως αυθεντικά
+    - name: get key
+      shell: "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -"
+      #ignore_errors: yes
+    
+    # Η προσθήκη του Docker repo στα system package sources, καθιστά τα πακέτα Docker διαθέσιμα για εγκατάσταση μέσω του apt.
+    - name: Add docker ppa
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu focal stable
+        state: present
+        update_cache: yes
+
+    - name: install docker
+      apt:
+        name: "{{item}}"
+        state: present
+        update_cache: true
+      loop:
+        - docker-ce
+        - docker-compose
+
+    - name: start docker service
+      service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: adding existing user to group docker
+      user:
+        name: "{{ ansible_user_id }}"
+        groups: docker
+        append: yes

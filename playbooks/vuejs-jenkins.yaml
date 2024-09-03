@@ -1,0 +1,144 @@
+---
+- hosts: appservers
+  # Για την εγκατάσταση του frontend μέσω jenkins, η διαδικασία είναι παρόμοια-ίδια στο συγκεκριμένο playbook με αυτήν στο playbook vuejs.yaml, για αυτό δεν προσθέτω και 
+  # αντίστοιχα σχόλια. Το μόνο που αλλάζει είναι ότι προσθέτω ένα task παρακάτω, το οποίο αλλάζει την IP του backend στο .env αρχείο με την IP του vm 
+  # στο οποίο τρέχει τώρα το backend. Τόσο το backend όσο και το frontend τρέχουν στην ίδια IP ωστόσο στο .env αρχείο υπάρχει IP για backend ενός άλλου vm 
+  # από προηγούμενη εκτέλεση-deployment με άλλη μέθοδο.  
+  vars:
+      frontendappdir: "{{ ansible_user_dir }}/frontend"
+      branch: "front"
+      site_location: /var/www/vue
+
+  pre_tasks:
+
+    - name: Install Nginx
+      package:
+        name: nginx
+        state: latest
+      become: yes
+
+    - name: Install nvm
+      shell: |
+        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+      args:
+        executable: /bin/bash
+        chdir: "$HOME"
+        creates: "$HOME/.nvm/nvm.sh"
+
+    - name: Setup .profile
+      ansible.builtin.lineinfile:
+        path: ~/.profile
+        line: source ~/.nvm/nvm.sh # This will make sure Node is on the user's PATH
+        create: yes
+
+    - name: "debug"
+      ansible.builtin.debug:
+        msg: "PATH : {{ ansible_env.PATH }}"
+      
+    - name: Install node
+      shell: |
+        source $HOME/.nvm/nvm.sh && nvm install 20.12.1
+      args:
+        executable: /bin/bash
+        chdir: "$HOME"
+        creates: "$HOME/.nvm/versions/node/v20.12.1"
+  
+    - name: Install Git
+      package:
+        name: git
+        state: latest
+      become: yes
+
+    - name: Remove existing NGINX site configuration
+      file:
+        path: /etc/nginx/sites-enabled/spring
+        state: absent
+      become: yes
+
+    - name: Restart NGINX service
+      service:
+        name: nginx
+        state: restarted
+      become: yes
+
+
+
+  tasks:
+    - name: "Clone the Vue repository"
+      git:
+          repo: "https://github.com/JBaizanis/devops-test.git"
+          dest: "{{ frontendappdir }}"
+          version: "{{ branch }}"
+          force: yes
+
+    - name: copy env file
+      shell : "cp {{frontendappdir}}/.env.example {{frontendappdir}}/.env"
+
+    - name: populate  ~/.env
+      lineinfile:
+        dest: "{{frontendappdir}}/.env"
+        state: present
+        regexp: "^{{item.key}}="
+        line: "{{item.key}}='{{item.value}}'"
+      with_items:
+        - "{{app | dict2items}}"
+
+    - name: populate .env with VITE_BACKEND
+      lineinfile:
+        dest: "{{ frontendappdir }}/.env"
+        state: present
+        regexp: "^VITE_BACKEND="
+        line: "VITE_BACKEND='http://51.120.247.169:8080'"
+
+
+    - name: "Install dependencies"
+      shell: |
+        export PATH=$PATH:~/.nvm/versions/node/v20.12.1/bin; npm install
+      args:
+        chdir: "{{ frontendappdir }}"
+
+    - name: "Build the Vue.js application"
+      shell: |
+        export PATH=$PATH:~/.nvm/versions/node/v20.12.1/bin; npm run build
+      args:
+        chdir: "{{ frontendappdir }}"
+
+    - name: Copy dist in nginx location 
+      copy:
+        src: "{{ frontendappdir }}/dist/"
+        dest: "{{ site_location }}"
+        remote_src: True
+        mode: 7777
+        force: true
+      notify: restart nginx
+      become: yes
+
+    - name: copy nginx conf file
+      template:
+        src: ../files/nginx.vue.j2
+        dest: "/etc/nginx/sites-available/vue"
+      become: yes
+
+    - name: enable vue site in nginx
+      file:
+        src: "/etc/nginx/sites-available/vue"
+        dest: "/etc/nginx/sites-enabled/vue"
+        state: link
+      become: yes
+    
+
+    - name: de-activate default nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      become: yes
+      notify: restart nginx
+    
+  handlers:
+    - name: restart nginx
+      service:
+        name: nginx
+        state: restarted
+      become: yes
+
+    

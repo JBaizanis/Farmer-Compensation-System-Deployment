@@ -1,0 +1,4 @@
+db:
+  name: "compensation"
+  user: "dbuser"
+  password: "pass123"
