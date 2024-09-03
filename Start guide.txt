@@ -13,3 +13,5 @@
 4) Μετάβαση στον σύνδεσμο http://localhost:8080/swagger-ui/index.html/ όπου βρίσκονται αναλυτικά όλες οι μέθοδοι των Controllers, Rest Controllers
    και ο Auth Controller.
 5) Εκτέλεση των αντίστοιχων μεθόδων.
+
+!!! Για το Deployment της εφαρμογής με την χρήση του Docker απαιτείται η παρουσία ενός αρχείου .dockerconfig.json.
